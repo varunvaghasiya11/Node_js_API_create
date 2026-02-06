@@ -3,6 +3,35 @@ const usermodel = require("../models/usermodel");
 const { generateToken } = require("../utils/jwt");
 const standardmodel = require("../models/standard");
 const subjectmodel = require("../models/subject");
+const attendenceModel = require("../models/attendence");
+
+const calculateAttendanceForStudent = async (studentId) => {
+    const attendanceRecords = await attendenceModel.find({
+        "records.studentId": studentId
+    });
+
+    let totalDays = 0;
+    let presentDays = 0;
+
+    attendanceRecords.forEach(doc => {
+        const studentRecord = doc.records.find(r => r.studentId.toString() === studentId.toString());
+        if (studentRecord) {
+            totalDays++;
+            if (studentRecord.status === 'present') {
+                presentDays++;
+            }
+        }
+    });
+
+    const percentage = totalDays === 0 ? 0 : ((presentDays / totalDays) * 100).toFixed(2);
+
+    return {
+        totalDays,
+        presentDays,
+        percentage: percentage + "%"
+    };
+}
+
 
 const register = async (req, res) => {
     try {
@@ -77,7 +106,15 @@ const TeacherDashboard = async (req, res) => {
 }
 const StudentDashboard = async (req, res) => {
     try {
-        return res.status(200).json({ message: "studentDashboard" })
+        const studentId = req.user.id;
+        const attendance = await calculateAttendanceForStudent(studentId);
+
+        return res.status(200).json({
+            message: "studentDashboard",
+            data: {
+                attendance
+            }
+        })
     } catch (error) {
         return res.status(500).json({ message: error.message });
     }
@@ -109,7 +146,7 @@ const studentcontroller = async (req, res) => {
 
 const createteacher = async (req, res) => {
     try {
-        const { firstname, lastname, username, email, password, subject } = req.body;
+        const { firstname, lastname, username, email, password, subject, standard } = req.body;
 
         if (!firstname || !lastname || !username || !email || !password || !subject) {
             return res.status(400).json({ message: "All fields are required" })
@@ -130,34 +167,44 @@ const createteacher = async (req, res) => {
         const subjectArray = subject.split(" ")
         console.log("subjectArray :", subjectArray[0])
 
-        const checkSubject = async ()=>{
-            for(let i = 0 ; i < subjectArray.length; i++){
-                const isSubject = await subjectmodel.findOne({subject : subjectArray[i]})
-                console.log("isSubject running" , isSubject)
-    
-                if(!isSubject){
+        const checkSubject = async () => {
+            for (let i = 0; i < subjectArray.length; i++) {
+                const isSubject = await subjectmodel.findOne({ subject: subjectArray[i] })
+                console.log("isSubject running", isSubject)
+
+                if (!isSubject) {
                     console.log("this subject not found in Db")
-                    return false 
+                    return subjectArray[i]; // Return the missing subject
                 }
-                
+
             }
             return true
         }
-        
-        if(!(await checkSubject())){
-            return res.json({"massage" : "subject not found"})
+
+        const subjectCheck = await checkSubject();
+        if (subjectCheck !== true) {
+            return res.json({ "massage": `subject '${subjectCheck}' not found` })
         }
 
-        const subjectIDArray =[];
+        if (!standard) {
+            return res.status(400).json({ message: "Standard is required" });
+        }
+        const isStandard = await standardmodel.findOne({ standard });
+        if (!isStandard) {
+            return res.json({ "massage": "standard not found" })
+        }
+        const standardId = isStandard._id;
 
-        for(let i =0 ; i < subjectArray.length ; i++){
-             const subject =  await subjectmodel.findOne({subject : subjectArray[i]})
+        const subjectIDArray = [];
+
+        for (let i = 0; i < subjectArray.length; i++) {
+            const subject = await subjectmodel.findOne({ subject: subjectArray[i] })
             subjectIDArray.push(subject._id)
         }
 
 
         const hashedPassword = bcrypt.hashSync(password, 10);
-        const user = await usermodel.create({ firstname, lastname, username, email, password: hashedPassword, role: 'teacher', subject });
+        const user = await usermodel.create({ firstname, lastname, username, email, password: hashedPassword, role: 'teacher', subject: subjectIDArray, standard: standardId });
 
         return res.status(200).json({ message: "teacher registered successfully", data: user })
     } catch (error) {
@@ -185,14 +232,14 @@ const createstudent = async (req, res) => {
             return res.status(400).json({ message: "Email already exists" })
         }
 
-        const isStandard = await standardmodel.findOne({standard});
-        if(!isStandard){
-            return res.json({"massage" : "standard not found"})
+        const isStandard = await standardmodel.findOne({ standard });
+        if (!isStandard) {
+            return res.json({ "massage": "standard not found" })
         }
-        const standardId = isStandard._id 
-        const hashedPassword = bcrypt.hashSync(password,10);
+        const standardId = isStandard._id
+        const hashedPassword = bcrypt.hashSync(password, 10);
 
-        const user = await usermodel.create({ firstname, lastname, username, email, password: hashedPassword, role: "student", standard : standardId });
+        const user = await usermodel.create({ firstname, lastname, username, email, password: hashedPassword, role: "student", standard: standardId });
 
         return res.status(200).json({ message: "student registered successfully", data: user })
     } catch (error) {
@@ -202,8 +249,31 @@ const createstudent = async (req, res) => {
 
 const viewstudent = async (req, res) => {
     try {
-        const users = await usermodel.find({ role: "student" }).select("-password");
-        return res.status(200).json({ message: "students", data: users })
+        let query = { role: "student", isDeleted: false };
+
+        if (req.user.role === "teacher") {
+            const teacher = await usermodel.findById(req.user.id);
+            if (!teacher) {
+                return res.status(404).json({ message: "Teacher not found" });
+            }
+            query.standard = teacher.standard;
+        }
+
+        const users = await usermodel.find(query).select("-password");
+
+        if (!users || users.length === 0) {
+            return res.status(400).json({ message: "students not found" })
+        }
+
+        const studentData = await Promise.all(users.map(async (user) => {
+            const attendance = await calculateAttendanceForStudent(user._id);
+            return {
+                ...user.toObject(),
+                attendance
+            };
+        }));
+
+        return res.status(200).json({ message: "students", data: studentData })
     } catch (error) {
         return res.status(500).json({ message: error.message });
     }
@@ -230,11 +300,26 @@ const editteacher = async (req, res) => {
             return res.status(400).json({ message: "User already exists" })
         }
         const existingEmail = await usermodel.findOne({ email });
-        if (existingEmail) {
+
+        if (existingEmail && existingEmail.id !== id) {
             return res.status(400).json({ message: "Email already exists" })
         }
-        const hashedPassword = bcrypt.hashSync(password, 10);
-        const user = await usermodel.findByIdAndUpdate(id, { firstname, lastname, username, email, password: hashedPassword, role: "teacher" });
+
+        let updateData = { firstname, lastname, username, email, role: "teacher" };
+        if (password) {
+            updateData.password = bcrypt.hashSync(password, 10);
+        }
+
+        const { standard } = req.body;
+        if (standard) {
+            const isStandard = await standardmodel.findOne({ standard });
+            if (!isStandard) {
+                return res.json({ "massage": "standard not found" })
+            }
+            updateData.standard = isStandard._id;
+        }
+
+        const user = await usermodel.findByIdAndUpdate(id, updateData, { new: true });
         return res.status(200).json({ message: "teacher updated successfully", data: user })
     } catch (error) {
         return res.status(500).json({ message: error.message });
@@ -267,7 +352,7 @@ const editstudent = async (req, res) => {
 const deletestudent = async (req, res) => {
     try {
         const { id } = req.params;
-        const user = await usermodel.findByIdAndDelete(id);
+        const user = await usermodel.findByIdAndUpdate(id, { isDeleted: true, deletedAt: Date.now() });
         return res.status(200).json({ message: "student deleted successfully" })
     } catch (error) {
         return res.status(500).json({ message: error.message });
@@ -324,6 +409,72 @@ const createSubject = async (req, res) => {
     }
 }
 
-module.exports = { register, login, admincontroller, teachercontroller, studentcontroller, AdminDashboard, TeacherDashboard, StudentDashboard, createteacher, createstudent, viewstudent, viewteacher, deletestudent, deleteteacher, createstandard, createSubject, editteacher, editstudent }
+const viewallstudent = async (req, res) => {
+    try {
+        let query = {
+            role: "student",
+            isDeleted: false
+        };
+
+        if (req.user.role === "teacher") {
+            const teacher = await usermodel.findById(req.user.id);
+
+            if (!teacher) {
+                return res.status(404).json({ message: "Teacher not found" });
+            }
+
+            query.standard = teacher.standard;
+        }
+
+        const students = await usermodel
+            .find(query)
+            .select("-password")
+            .populate("standard");
+
+        const studentData = await Promise.all(students.map(async (student) => {
+            const attendance = await calculateAttendanceForStudent(student._id);
+            return {
+                ...student.toObject(),
+                attendance
+            };
+        }));
+
+        return res.status(200).json({
+            message: "students",
+            data: studentData
+        });
+    } catch (error) {
+        return res.status(500).json({ message: error.message });
+    }
+};
+
+
+const attendence = async (req, res) => {
+    try {
+        const { date, studentId, status } = req.body
+
+        const attendanceDate = date || new Date().toISOString().split('T')[0];
+
+        if (!studentId || !status) {
+            return res.status(400).json({ message: "StudentId and status are required" })
+        }
+
+        await attendenceModel.create({
+            date: attendanceDate,
+            records: [
+                {
+                    studentId,
+                    status
+                }
+            ],
+            markedBy: req.user.id
+        })
+        res.json({ "massage": "attendence marked for student " })
+    } catch (error) {
+        return res.status(500).json({ message: error.message });
+    }
+}
+
+module.exports = { register, login, admincontroller, teachercontroller, studentcontroller, AdminDashboard, TeacherDashboard, StudentDashboard, createteacher, createstudent, viewstudent, viewteacher, deletestudent, deleteteacher, createstandard, createSubject, editteacher, editstudent, viewallstudent, attendence }
 
 

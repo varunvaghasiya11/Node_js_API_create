@@ -1,6 +1,6 @@
 const express = require("express");
 const router = express.Router();
-const { TeacherDashboard, createteacher, viewteacher, deleteteacher ,editteacher} = require("../controllers/controller");
+const { TeacherDashboard, createteacher, viewteacher, deleteteacher, editteacher } = require("../controllers/controller");
 const { auth, authorize } = require("../middleware/dashboard");
 
 

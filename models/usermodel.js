@@ -37,9 +37,13 @@ const userSchema = new mongoose.Schema({
         ref : "Subject",
         required : true
     }],
+    isDeleted : {
+        type : Boolean,
+        default : false
+    },
     deletedAt : {
         type : Date,
-        default : Date.now()
+        default : null
     }
 })
 
